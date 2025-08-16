@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>ライフミール自動セレクター</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <meta name="theme-color" content="#111111">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <style>
+    :root { --bg:#fafafa; --card:#fff; --ink:#111; --muted:#666; --accent:#111; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, sans-serif; background:var(--bg); color:var(--ink); }
+    header { padding:16px; display:flex; gap:12px; align-items:center; justify-content:space-between; position:sticky; top:0; background:var(--bg); z-index:2; border-bottom:1px solid #eee; }
+    h1 { font-size:18px; margin:0; }
+    main { max-width:720px; margin:0 auto; padding:16px; }
+    .card { background:var(--card); border:1px solid #eee; border-radius:12px; padding:16px; box-shadow: 0 1px 0 rgba(0,0,0,.02); }
+    .row { display:flex; gap:8px; align-items:center; }
+    input[type="url"] { flex:1; padding:10px 12px; border:1px solid #ddd; border-radius:8px; font-size:14px; }
+    button { appearance:none; border:none; border-radius:10px; padding:12px 14px; background:var(--accent); color:#fff; font-weight:600; font-size:14px; cursor:pointer; }
+    button.ghost { background:#eee; color:#111; }
+    button.outline { background:#fff; color:#111; border:1px solid #ddd; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+    .list { display:grid; gap:8px; margin-top:12px; }
+    .item { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:12px; border:1px solid #eee; border-radius:10px; background:#fff; }
+    .meta { display:flex; flex-direction:column; gap:2px; min-width:0; }
+    .cat { font-size:12px; color:var(--muted); }
+    .name { font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .toast { position:fixed; left:50%; transform:translateX(-50%); bottom:20px; background:#111; color:#fff; padding:10px 14px; border-radius:999px; font-size:13px; opacity:0; transition:.2s; }
+    .toast.show { opacity:1; }
+    .hint { color:var(--muted); font-size:12px; }
+    .spacer { height:8px; }
+    .grid { display:grid; gap:10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ライフミール自動セレクター</h1>
+    <div class="toolbar">
+      <button id="btn-propose">5食を提案</button>
+      <button id="btn-copy" class="outline">コピー</button>
+      <button id="btn-share" class="outline">共有</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card grid">
+      <div class="row">
+        <input id="csv-url" type="url" placeholder="CSV公開URLを貼り付け（Googleスプレッドシートのウェブ公開CSV）">
+        <button id="btn-load" class="ghost">読込</button>
+      </div>
+      <div class="hint">固定URLは埋め込み済み。ここに貼ると一時的に差し替えできます（?csv= パラメータ優先）。</div>
+      <div class="row">
+        <input id="file-csv" type="file" accept=".csv">
+        <button id="btn-load-file" class="ghost">CSV上書き</button>
+      </div>
+    </section>
+
+    <section id="out" class="card">
+      <div class="list" id="list"></div>
+    </section>
+
+    <div class="toast" id="toast">メッセージ</div>
+  </main>
+
+  <script>
+    // ▼ 固定のCSV公開URL（ユーザー埋め込み版）
+    const DEFAULT_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRBaqjAExTVApI_c_RaSJIPzx3G_xydVeoXnNm_qzNZQsg6NmTIpRZtS3aqmnxHAjy_MbGl4GFeZC7s/pub?gid=0&single=true&output=csv";
+    // URLパラメータ優先 → なければ DEFAULT_CSV
+    const params = new URLSearchParams(location.search);
+    const overrideCsv = params.get('csv');
+    const initialCsvUrl = overrideCsv || DEFAULT_CSV;
+
+    // 状態
+    let master = null; // { categories: {id: {label, items:[], count}} }
+    let current = [];  // [{catId, catLabel, name}] 5件
+
+    // ユーティリティ
+    const $ = (sel) => document.querySelector(sel);
+    function toast(msg) { const el = $("#toast"); el.textContent = msg; el.classList.add("show"); setTimeout(()=>el.classList.remove("show"), 1800); }
+    function pickRandom(arr) { return arr[Math.floor(Math.random()*arr.length)]; }
+
+    // CSVパーサ（クォートと改行に対応した軽量版）
+    function parseCSV(text) { 
+      const rows = []; let i=0, field="", row=[], inQuotes=false;
+      while (i < text.length) { 
+        const c = text[i];
+        if (inQuotes) { 
+          if (c === '"') { 
+            if (text[i+1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+          } else { field += c; }
+        } else { 
+          if (c === '"') { inQuotes = true; }
+          else if (c === ',') { row.push(field); field=""; }
+          else if (c === '\\n' || c === '\\r') { 
+            if (c === '\\r' && text[i+1] === '\\n') i++;
+            row.push(field); field=""; if (row.length) rows.push(row); row=[];
+          } else { field += c; }
+        }
+        i++;
+      }
+      if (field.length || row.length) { row.push(field); rows.push(row); }
+      return rows;
+    }
+
+    function normalizeHeader(h) { return h.trim().toLowerCase(); }
+
+    function csvToMaster(text) { 
+      const rows = parseCSV(text);
+      if (!rows.length) throw new Error("CSVが空です");
+      const header = rows[0].map(normalizeHeader);
+      const idx = {
+        category_id: header.indexOf("category_id"),
+        category_label: header.indexOf("category_label"),
+        item_name: header.indexOf("item_name"),
+        target_count: header.indexOf("target_count"),
+        active: header.indexOf("active")
+      };
+      ["category_id","category_label","item_name"].forEach(k => {
+        if (idx[k] === -1) throw new Error("CSVヘッダに " + k + " が必要です");
+      });
+      const categories = {};
+      for (let r=1; r<rows.length; r++) { 
+        const row = rows[r];
+        if (!row || !row.length) continue;
+        const catId = (row[idx.category_id] || "").trim();
+        const catLabel = (row[idx.category_label] || "").trim() || catId;
+        const name = (row[idx.item_name] || "").trim();
+        if (!catId || !name) continue;
+        const activeVal = idx.active>=0 ? (row[idx.active]||"").trim().toUpperCase() : "TRUE";
+        if (activeVal === "FALSE") continue;
+        if (!categories[catId]) { categories[catId] = { label: catLabel, items: [], count: 0 }; }
+        categories[catId].items.push(name);
+        if (idx.target_count>=0) { 
+          const t = (row[idx.target_count]||"").trim();
+          if (t && !categories[catId].count) { categories[catId].count = Math.max(0, parseInt(t,10) || 0); }
+        }
+      }
+      return { categories };
+    }
+
+    function ensureCounts(master) { 
+      const cats = master.categories;
+      const sum = Object.values(cats).reduce((a,c)=>a+(c.count||0),0);
+      if (sum>0) return;
+      const guess = [ ["chicken",2], ["beef",1], ["seafood",1] ];
+      let otherId = Object.keys(cats).find(id => !["chicken","beef","seafood"].includes(id));
+      if (!otherId && Object.keys(cats).length) otherId = Object.keys(cats)[0];
+      guess.forEach(([id, n]) => { if (cats[id]) cats[id].count = n; });
+      if (otherId) cats[otherId].count = cats[otherId].count || 1;
+    }
+
+    function proposeFive() { 
+      if (!master) { toast("マスターが未読込です"); return; }
+      ensureCounts(master);
+      const cats = master.categories;
+      const selected = [];
+      for (const [catId, cat] of Object.entries(cats)) { 
+        const need = Math.max(0, cat.count|0);
+        const pool = [...new Set(cat.items)];
+        for (let i=0; i<need; i++) { 
+          const exclude = new Set(selected.map(x=>x.name));
+          const filtered = pool.filter(n => !exclude.has(n));
+          if (!filtered.length) break;
+          const pick = pickRandom(filtered);
+          selected.push({ catId, catLabel: cat.label, name: pick });
+        }
+      }
+      // 上限5件に合わせておく（合計>5のとき）
+      current = selected.slice(0,5);
+      render();
+    }
+
+    function reroll(index) { 
+      const item = current[index];
+      if (!item) return;
+      const cat = master.categories[item.catId];
+      if (!cat) return;
+      const exclude = new Set(current.map((x, i)=> i===index ? null : x.name));
+      const pool = [...new Set(cat.items)].filter(n => !exclude.has(n));
+      if (!pool.length) { toast("このカテゴリで未使用の候補がありません"); return; }
+      const filtered = pool.filter(n => n !== item.name);
+      const pickFrom = filtered.length ? filtered : pool;
+      const next = pickRandom(pickFrom);
+      current[index] = { catId: item.catId, catLabel: item.catLabel, name: next };
+      render();
+    }
+
+    function render() { 
+      const list = $("#list");
+      list.innerHTML = "";
+      current.forEach((it, idx) => { 
+        const div = document.createElement("div");
+        div.className = "item";
+        div.innerHTML = `
+          <div class="meta">
+            <div class="cat">${{it.catLabel}}</div>
+            <div class="name" title="${{it.name}}">${{it.name}}</div>
+          </div>
+          <div class="row">
+            <button class="outline" data-idx="${{idx}}">再抽選</button>
+          </div>
+        `;
+        list.appendChild(div);
+      });
+      list.querySelectorAll("button[data-idx]").forEach(btn => btn.addEventListener("click", e => reroll(parseInt(e.currentTarget.dataset.idx,10))));
+    }
+
+    async function loadCsvFromUrl(url) { 
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error("CSV取得に失敗しました");
+      const text = await res.text();
+      master = csvToMaster(text);
+      toast("CSVを読み込みました");
+    }
+
+    function loadCsvFromFile(file) { 
+      const reader = new FileReader();
+      reader.onload = () => { 
+        try { 
+          master = csvToMaster(reader.result);
+          toast("CSVファイルを読み込みました");
+        } catch (e) { toast("CSV解析エラー: " + e.message); }
+      };
+      reader.readAsText(file, "utf-8");
+    }
+
+    function copyOutput() { 
+      if (!current.length) { toast("出力がありません"); return; }
+      const text = current.map(x=>`・${{x.name}}`).join("\\n");
+      navigator.clipboard.writeText(text).then(()=>toast("コピーしました")).catch(()=>toast("コピーできませんでした"));
+    }
+
+    async function shareOutput() { 
+      if (!current.length) { toast("出力がありません"); return; }
+      const text = current.map(x=>`・${{x.name}}`).join("\\n");
+      if (navigator.share) { 
+        try { await navigator.share({ title: "今週の5食", text }); } catch(e) {}
+      } else { copyOutput(); }
+    }
+
+    window.addEventListener("DOMContentLoaded", async () => { 
+      if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
+      document.querySelector("#csv-url").value = initialCsvUrl || "";
+      document.querySelector("#btn-load").addEventListener("click", async () => { 
+        const url = document.querySelector("#csv-url").value.trim();
+        if (!url) return toast("URLを入力してください");
+        try { await loadCsvFromUrl(url); render(); } catch(e) { toast(e.message); }
+      });
+      document.querySelector("#btn-load-file").addEventListener("click", () => { 
+        const f = document.querySelector("#file-csv").files[0]; 
+        if (!f) return toast("CSVファイルを選択してください");
+        loadCsvFromFile(f); render();
+      });
+      document.querySelector("#btn-propose").addEventListener("click", () => proposeFive());
+      document.querySelector("#btn-copy").addEventListener("click", () => copyOutput());
+      document.querySelector("#btn-share").addEventListener("click", () => shareOutput());
+
+      if (initialCsvUrl) { 
+        try { await loadCsvFromUrl(initialCsvUrl); } catch(e) { console.warn(e); }
+      }
+    });
+  </script>
+</body>
+</html>
