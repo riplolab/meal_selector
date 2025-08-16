@@ -1,5 +1,5 @@
-// lifemeal PWA service worker
-const APP_CACHE = "lifemeal-app-v1";
+// lifemeal PWA service worker (v2)
+const APP_CACHE = "lifemeal-app-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
