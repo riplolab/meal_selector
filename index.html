@@ -145,12 +145,24 @@
       const cats = master.categories;
       const sum = Object.values(cats).reduce((a,c)=>a+(c.count||0),0);
       if (sum>0) return;
-      // fallback（CSVにcountが無い場合）：鶏2/牛1/魚1/その他1 を推定
-      const guess = [ ["chicken",2], ["beef",1], ["seafood",1] ];
-      let otherId = Object.keys(cats).find(id => !["chicken","beef","seafood"].includes(id));
-      if (!otherId && Object.keys(cats).length) otherId = Object.keys(cats)[0];
-      guess.forEach(([id, n]) => { if (cats[id]) cats[id].count = n; });
-      if (otherId) cats[otherId].count = cats[otherId].count || 1;
+      // fallback（target_count未設定時）：カテゴリを巡回しながらユニーク候補数の範囲で5枠に達するまで均等配分
+      const entries = Object.entries(cats)
+        .map(([id, cat]) => ({ id, cat, capacity: new Set(cat.items).size }))
+        .filter(entry => entry.capacity > 0);
+      if (!entries.length) return;
+      entries.forEach(entry => { entry.cat.count = 0; });
+      let allocated = 0;
+      while (allocated < 5) {
+        let progressed = false;
+        for (const entry of entries) {
+          if (allocated >= 5) break;
+          if (entry.cat.count >= entry.capacity) continue;
+          entry.cat.count += 1;
+          allocated += 1;
+          progressed = true;
+        }
+        if (!progressed) break;
+      }
     }
 
     function proposeFive() {
